@@ -28,17 +28,14 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isBootstrapSuperAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'mralun683@gmail.com' ||
-        request.auth.token.email == 'specialforme683@gmail.com' ||
-        request.auth.token.email == 'mahrmohsin683@gmail.com' ||
-        request.auth.token.email == 'aatech683@gmail.com'
-      );
+    function isSuperAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'SUPER_ADMIN';
     }
 
     function isAdmin() {
-      return isBootstrapSuperAdmin() || (
+      return isSuperAdmin() || (
         isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'PRODUCT_MANAGER', 'ORDER_MANAGER']
@@ -260,18 +257,18 @@ service cloud.firestore {
     // Collection 1: /users/{userId}
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isBootstrapSuperAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isSuperAdmin());
       allow create: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) &&
         incoming().uid == request.auth.uid &&
         userId == request.auth.uid &&
-        (incoming().role == 'CUSTOMER' || isBootstrapSuperAdmin());
+        (incoming().role == 'CUSTOMER' || isSuperAdmin());
       allow update: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) &&
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt && (
-          isAdmin() ||
+          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt'])) ||
           (isOwner(userId) && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt']))
         );
-      allow delete: if isValidId(userId) && isBootstrapSuperAdmin();
+      allow delete: if isValidId(userId) && isSuperAdmin();
     }
 
     // Collection 2: /products/{productId}
@@ -319,7 +316,7 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
           )
         );
-      allow delete: if isSignedIn() && isValidId(orderId) && isBootstrapSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(orderId) && isSuperAdmin();
     }
 
     // Collection 5: /coupons/{couponId}
@@ -376,7 +373,7 @@ service cloud.firestore {
         incoming().actorUid == existing().actorUid &&
         incoming().createdAt == existing().createdAt &&
         isAdmin();
-      allow delete: if isSignedIn() && isValidId(taskId) && isBootstrapSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(taskId) && isSuperAdmin();
     }
 
     // Collection 9: /notifications/{notificationId}

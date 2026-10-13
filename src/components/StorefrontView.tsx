@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Search,
   ShoppingBag,
@@ -103,6 +103,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ onOpenAdmin }) =
     placeOrder,
     acceptOrRejectShippingQuote,
     submitReview,
+    showToast,
   } = useStore();
 
   const [subView, setSubView] = useState<StoreSubView>('HOME');
@@ -209,11 +210,59 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ onOpenAdmin }) =
 
   const [orderNotes, setOrderNotes] = useState('');
   const [confirmedOrderNumber, setConfirmedOrderNumber] = useState<string | null>(null);
+  const [confirmedOrderAccessToken, setConfirmedOrderAccessToken] = useState<string | null>(null);
+  const [isTrackingModalOpen, setIsTrackingModalOpen] = useState(false);
+  const [trackedOrder, setTrackedOrder] = useState<any | null>(null);
+  const [trackingLoading, setTrackingLoading] = useState(false);
+  const [trackingError, setTrackingError] = useState<string | null>(null);
+  const [trackingOrderInput, setTrackingOrderInput] = useState('');
+  const [trackingTokenInput, setTrackingTokenInput] = useState('');
   const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [selectedGmailOrder, setSelectedGmailOrder] = useState<Order | null>(null);
   const [isGmailModalOpen, setIsGmailModalOpen] = useState(false);
   const [resendStatus, setResendStatus] = useState<string | null>(null);
   const [isResendingReceipt, setIsResendingReceipt] = useState(false);
+
+  const handleTrackOrder = async (orderNum: string, tokenStr?: string) => {
+    if (!orderNum || !orderNum.trim()) return;
+    setTrackingLoading(true);
+    setTrackingError(null);
+    setTrackedOrder(null);
+    try {
+      const qToken = tokenStr || confirmedOrderAccessToken || '';
+      const url = `/api/orders/track?order=${encodeURIComponent(orderNum.trim())}${qToken ? `&token=${encodeURIComponent(qToken)}` : ''}`;
+      const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+      const res = await fetch(url, {
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      const data = await res.json();
+      if (data.success && data.order) {
+        setTrackedOrder(data.order);
+      } else {
+        setTrackingError(data.error || 'Unable to locate order tracking details.');
+      }
+    } catch {
+      setTrackingError('Network error while looking up order tracking details.');
+    } finally {
+      setTrackingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const orderParam = params.get('order');
+      const tokenParam = params.get('token');
+      if (orderParam) {
+        setTrackingOrderInput(orderParam);
+        if (tokenParam) setTrackingTokenInput(tokenParam);
+        setIsTrackingModalOpen(true);
+        handleTrackOrder(orderParam, tokenParam || '');
+      }
+    }
+  }, []);
 
   const openGmailReceiptModal = (order: Order) => {
     setSelectedGmailOrder(order);
@@ -718,8 +767,13 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ onOpenAdmin }) =
         directAutoDebit: false,
       });
       setConfirmedOrderNumber(order.orderNumber);
+      if (order.orderAccessToken) {
+        setConfirmedOrderAccessToken(order.orderAccessToken);
+      }
       setCheckoutStep(3);
       window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (submitErr: any) {
+      setCheckoutErrorBanner(submitErr?.message || 'Failed to place order. Please review your details.');
     } finally {
       setIsSubmittingOrder(false);
     }
@@ -2257,6 +2311,57 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ onOpenAdmin }) =
                         {resendStatus}
                       </div>
                     )}
+                  </div>
+
+                  {/* Guest & Member Live Order Tracking Card */}
+                  <div className="p-4 bg-amber-50/90 border border-amber-300 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Package className="w-4 h-4 text-amber-800" />
+                        <strong className="text-amber-950 text-xs font-semibold">
+                          Live Order Tracking Link (ٹریکنگ لنک)
+                        </strong>
+                      </div>
+                      <span className="text-[10px] font-mono font-medium text-amber-900 bg-amber-200/60 px-2 py-0.5 rounded">
+                        Guest & Member Access
+                      </span>
+                    </div>
+                    <p className="text-xs text-amber-900 leading-relaxed">
+                      You can track your order status, payment verification, and courier dispatch anytime at the link below:
+                    </p>
+                    <div className="p-2.5 bg-white border border-amber-200/80 rounded font-mono text-[11px] text-amber-950 truncate select-all flex items-center justify-between gap-2">
+                      <span className="truncate">
+                        {typeof window !== 'undefined'
+                          ? `${window.location.origin}/track?order=${confirmedOrderNumber}${confirmedOrderAccessToken ? `&token=${confirmedOrderAccessToken}` : ''}`
+                          : `/track?order=${confirmedOrderNumber}`}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTrackingOrderInput(confirmedOrderNumber);
+                          if (confirmedOrderAccessToken) setTrackingTokenInput(confirmedOrderAccessToken);
+                          setIsTrackingModalOpen(true);
+                          handleTrackOrder(confirmedOrderNumber, confirmedOrderAccessToken || '');
+                        }}
+                        className="px-4 py-2 bg-[#141413] hover:bg-[#2A2A28] text-white text-xs font-semibold flex items-center gap-2 cursor-pointer shadow-xs"
+                      >
+                        <Search className="w-3.5 h-3.5" />
+                        Track Order Status
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const trackUrl = `${window.location.origin}/track?order=${confirmedOrderNumber}${confirmedOrderAccessToken ? `&token=${confirmedOrderAccessToken}` : ''}`;
+                          navigator.clipboard?.writeText(trackUrl);
+                          showToast?.('Tracking link copied to clipboard!');
+                        }}
+                        className="px-3 py-2 border border-amber-400 text-amber-950 hover:bg-amber-100 text-xs font-medium cursor-pointer"
+                      >
+                        📋 Copy Tracking Link
+                      </button>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-4 pt-2">
@@ -4318,6 +4423,229 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ onOpenAdmin }) =
                   Close Receipt
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 7.5. GUEST & MEMBER LIVE ORDER TRACKING MODAL */}
+      {/* Accessible via /track?order=...&token=... or on-screen Tracking Link */}
+      {/* ========================================================================= */}
+      {isTrackingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-[#FBFBF9] border border-black/10 shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-[#141413] text-[#FBFBF9] flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <Package className="w-5 h-5 text-amber-400" />
+                <div>
+                  <h3 className="text-sm font-semibold tracking-wide">Live Order Tracking & Status</h3>
+                  <div className="text-[10px] text-white/60">Atelier Aurelia Courier & Verification Portal</div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsTrackingModalOpen(false)}
+                className="text-white/60 hover:text-white cursor-pointer p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-6">
+              {/* Search Form */}
+              <div className="p-4 bg-white border border-black/[0.08] rounded space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider text-[#787774] mb-1">
+                      Order Reference (e.g. ORD-104928)
+                    </label>
+                    <input
+                      type="text"
+                      value={trackingOrderInput}
+                      onChange={(e) => setTrackingOrderInput(e.target.value.toUpperCase())}
+                      placeholder="ORD-XXXXXX"
+                      className="w-full px-3 py-2 border border-black/20 text-xs font-mono uppercase bg-[#FBFBF9]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-wider text-[#787774] mb-1">
+                      Access Token (for Guest Orders)
+                    </label>
+                    <input
+                      type="text"
+                      value={trackingTokenInput}
+                      onChange={(e) => setTrackingTokenInput(e.target.value)}
+                      placeholder="Token from confirmation or email"
+                      className="w-full px-3 py-2 border border-black/20 text-xs font-mono bg-[#FBFBF9]"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    disabled={trackingLoading || !trackingOrderInput.trim()}
+                    onClick={() => handleTrackOrder(trackingOrderInput, trackingTokenInput)}
+                    className="px-5 py-2 bg-[#141413] hover:bg-[#2A2A28] disabled:opacity-40 text-white text-xs font-medium cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Search className="w-3.5 h-3.5" />
+                    {trackingLoading ? 'Searching...' : 'Locate Order'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Error Alert */}
+              {trackingError && (
+                <div className="p-4 bg-red-50 border border-red-200 text-red-800 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                  <span>{trackingError}</span>
+                </div>
+              )}
+
+              {/* Order Tracking Dossier */}
+              {trackedOrder && (
+                <div className="space-y-4">
+                  <div className="p-4 bg-white border border-black/[0.08] rounded space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] pb-3">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-[#8C6D46] font-semibold">
+                          Order Reference
+                        </div>
+                        <div className="text-lg font-mono font-bold text-[#141413]">
+                          {trackedOrder.orderNumber}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider rounded ${
+                          trackedOrder.status === 'DELIVERED'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : trackedOrder.status === 'SHIPPED'
+                            ? 'bg-sky-100 text-sky-800'
+                            : trackedOrder.status === 'CANCELLED'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}>
+                          Status: {trackedOrder.status}
+                        </span>
+                        <span className={`px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider rounded ${
+                          trackedOrder.paymentStatus === 'PAID'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}>
+                          Payment: {trackedOrder.paymentStatus}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
+                      <div>
+                        <span className="text-[#787774] block">Payment Protocol:</span>
+                        <strong className="text-[#141413]">{trackedOrder.paymentMethod}</strong>
+                        {trackedOrder.paymentReference && (
+                          <div className="text-[11px] text-[#8C6D46] pt-0.5">
+                            TID: {trackedOrder.paymentReference}
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <span className="text-[#787774] block">Total Amount:</span>
+                        <strong className="text-[#141413] text-sm">
+                          {trackedOrder.currency} {Number(trackedOrder.total).toLocaleString()}
+                        </strong>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <span className="text-[#787774] block">Shipping Destination:</span>
+                        <span className="text-[#141413]">{trackedOrder.shippingAddressSummary}</span>
+                      </div>
+                      {trackedOrder.trackingNumber && (
+                        <div className="sm:col-span-2 p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded">
+                          <span className="font-semibold block">Courier Tracking:</span>
+                          <span className="font-mono text-xs">
+                            {trackedOrder.courierName || 'Courier'} — {trackedOrder.trackingNumber}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Order Items */}
+                    {Array.isArray(trackedOrder.items) && trackedOrder.items.length > 0 && (
+                      <div className="border-t border-black/[0.06] pt-3 space-y-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-[#787774]">
+                          Ordered Items ({trackedOrder.items.length})
+                        </div>
+                        <div className="divide-y divide-black/[0.04]">
+                          {trackedOrder.items.map((it: any, idx: number) => (
+                            <div key={idx} className="py-2 flex items-center justify-between text-xs">
+                              <div>
+                                <span className="font-medium text-[#141413]">{it.name}</span>
+                                <span className="text-[#787774] font-mono text-[11px] ml-2">({it.sku})</span>
+                              </div>
+                              <div className="font-mono text-right">
+                                <span>{it.quantity} × {trackedOrder.currency} {Number(it.price).toLocaleString()}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Customer Cancellation Option for PENDING orders */}
+                    {trackedOrder.status === 'PENDING' && (
+                      <div className="border-t border-black/[0.06] pt-3 flex items-center justify-between">
+                        <span className="text-[11px] text-[#787774]">
+                          Order is currently pending fulfillment. You may cancel it to restore items.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!window.confirm('Are you sure you want to cancel this order?')) return;
+                            try {
+                              const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+                              const cRes = await fetch('/api/orders/cancel', {
+                                method: 'POST',
+                                headers: {
+                                  'Content-Type': 'application/json',
+                                  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                                },
+                                body: JSON.stringify({
+                                  orderNumber: trackedOrder.orderNumber,
+                                  orderAccessToken: trackingTokenInput || confirmedOrderAccessToken,
+                                  reason: 'Cancelled by customer',
+                                }),
+                              });
+                              const cData = await cRes.json();
+                              if (cRes.ok) {
+                                showToast?.('Order cancelled and inventory restored.');
+                                handleTrackOrder(trackedOrder.orderNumber, trackingTokenInput);
+                              } else {
+                                showToast?.(cData.error || 'Failed to cancel order.');
+                              }
+                            } catch {
+                              showToast?.('Network error cancelling order.');
+                            }
+                          }}
+                          className="px-3.5 py-1.5 border border-red-300 text-red-700 hover:bg-red-50 text-xs font-medium cursor-pointer"
+                        >
+                          Cancel Order
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3.5 bg-white border-t border-black/[0.08] flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsTrackingModalOpen(false)}
+                className="px-5 py-2 bg-[#141413] text-[#FBFBF9] text-xs font-medium cursor-pointer hover:bg-[#2A2A28]"
+              >
+                Close Tracking
+              </button>
             </div>
           </div>
         </div>

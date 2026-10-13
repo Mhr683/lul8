@@ -353,7 +353,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           } else {
             const newProfile: UserProfile = {
               uid: user.uid,
-              email: (user.email || 'client@atelieraurelia.com').slice(0, 250),
+              email: (user.email || '').slice(0, 250),
               name: (user.displayName || user.email?.split('@')[0] || 'Atelier Client').slice(0, 110),
               role: 'CUSTOMER',
               createdAt: new Date().toISOString(),
@@ -787,216 +787,80 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Place Order Flow (Revalidating prices & stock against trusted catalog records)
+  // Place Order Flow (Server-Side Atomic Order Placement & Stock Revalidation)
   const placeOrder: StoreContextValue['placeOrder'] = async (payload) => {
     const destCountryIso = (payload.destCountryIso || 'PK').toUpperCase();
     const isDomestic = destCountryIso === 'PK';
 
     // Strict validation: Reject COD outside Pakistan
     if (payload.paymentMethod === 'COD' && !isDomestic) {
-      throw new Error('Cash on Delivery (COD) is strictly restricted to Pakistan domestic destinations. International orders require advance payment or logistics quote.');
+      throw new Error('Cash on Delivery (COD) is strictly restricted to Pakistan domestic destinations.');
     }
 
-    // 1. Calculate and re-verify shipping fee using server-aligned ShippingCalculationService
-    const shippingCalc = ShippingCalculationService.calculate({
-      destinationCountryIso: destCountryIso,
-      items: cart,
-      catalogProducts: products,
-      settings,
-      selectedCourier: payload.shippingMethodId,
-      hasFreeShippingCoupon: appliedCoupon?.type === 'FREE_SHIPPING',
-    });
-    const shippingSnapshot = ShippingCalculationService.createSnapshot(shippingCalc);
-
-    // If destination requires manual quote and user submitted a quote request
-    const isQuoteRequest = Boolean(payload.isQuoteRequest || shippingCalc.requiresManualQuote || payload.paymentMethod === 'MANUAL_QUOTE');
-
-    // Trusted subtotal revalidation
-    const subtotal = cart.reduce((sum, item) => {
-      const liveProd = products.find((p) => p.id === item.productId);
-      const trustedPrice = liveProd ? liveProd.price : item.price;
-      return sum + trustedPrice * item.quantity;
-    }, 0);
-
-    let discount = 0;
-    if (appliedCoupon && !isQuoteRequest) {
-      if (appliedCoupon.type === 'PERCENTAGE') {
-        discount = (subtotal * appliedCoupon.value) / 100;
-        if (appliedCoupon.maxDiscount) {
-          discount = Math.min(discount, appliedCoupon.maxDiscount);
-        }
-      } else if (appliedCoupon.type === 'FIXED') {
-        discount = Math.min(subtotal, appliedCoupon.value);
-      }
-    }
-    const taxable = Math.max(0, subtotal - discount);
-    // Tax applies to domestic sales, or as configured
-    const taxRate = isDomestic ? settings.taxRate : 0;
-    const tax = Number(((taxable * taxRate) / 100).toFixed(2));
-    
-    // Trusted shipping fee calculation
-    const verifiedShippingFee = isQuoteRequest ? 0 : shippingCalc.finalShippingFee;
-    const total = Number((taxable + tax + verifiedShippingFee).toFixed(2));
-
-    const orderNum = `ORD-${Math.floor(1000 + Math.random() * 9000)}`;
-    const orderId = sanitizeDocId(`ord-${Date.now()}`);
-
-    const paymentResult = await PaymentGatewayService.processPayment({
-      orderNumber: orderNum,
-      amount: total,
-      currency: settings.currency,
-      method: payload.paymentMethod,
-      customerEmail: payload.customerEmail,
-      maskedInstrumentSummary: payload.paymentReference || payload.paymentProofDetails,
-      directAutoDebit: payload.directAutoDebit,
-      authCredentials: payload.authCredentials,
+    // Call server-side /api/orders/create endpoint with optional auth token
+    const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+    const orderRes = await fetch('/api/orders/create', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        items: cart.map((i) => ({ productId: i.productId, quantity: i.quantity })),
+        couponCode: appliedCoupon?.code,
+        customerName: payload.customerName,
+        customerPhone: payload.customerPhone,
+        customerEmail: payload.customerEmail,
+        shippingAddress: {
+          address: payload.shippingAddressSummary,
+          city: payload.district || 'Islamabad',
+          district: payload.district,
+          tehsil: payload.tehsil,
+          country: 'Pakistan',
+          countryIso: destCountryIso,
+        },
+        paymentMethod: payload.paymentMethod,
+        tid: payload.paymentReference,
+        notes: payload.notes,
+        destCountryIso,
+      }),
     });
 
-    const itemsManifest = cart
-      .map((item) => `${item.sku}x${item.quantity}`)
-      .join(', ');
-    const combinedNotes = [
-      `[Items: ${itemsManifest}]`,
-      payload.notes || '',
-      `[Shipping: ${shippingCalc.zoneName} via ${shippingCalc.carrier} (${shippingCalc.customsMode})]`,
-      `[Payment: ${paymentResult.providerMessage}]`,
-    ]
-      .filter(Boolean)
-      .join(' | ')
-      .slice(0, 950);
-
-    const initialOrderStatus: OrderStatus = isQuoteRequest
-      ? 'QUOTE_REQUESTED'
-      : paymentResult.paymentStatus === 'PAID'
-      ? 'CONFIRMED'
-      : 'PENDING';
-
-    const isAdvancePaymentPaid = !isQuoteRequest && paymentResult.paymentStatus === 'PAID';
-    let emailReceiptHtml = '';
-    let emailReceiptSubject = `Payment Recieved: Order #${orderNum} | ${settings.storeName || 'Atelier Aurelia'}`;
-
-    if (isAdvancePaymentPaid) {
-      try {
-        const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-        const emailRes = await fetch('/api/email/send-payment-receipt', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({
-            toEmail: payload.customerEmail,
-            customerName: payload.customerName,
-            orderNumber: orderNum,
-            storeName: settings.storeName || 'Atelier Aurelia',
-            paymentMethod: payload.paymentMethod,
-            paymentSubMethod: payload.paymentSubMethod,
-            paymentReference: payload.paymentReference || paymentResult.transactionId,
-            totalAmount: total,
-            currency: settings.currency,
-            items: cart.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price })),
-            shippingAddress: payload.shippingAddressSummary,
-            district: payload.district,
-            tehsil: payload.tehsil,
-          }),
-        });
-        if (emailRes.ok) {
-          const emailData = await emailRes.json();
-          emailReceiptHtml = emailData.htmlPreview || '';
-          if (emailData.subject) emailReceiptSubject = emailData.subject;
-        }
-      } catch (err) {
-        console.warn('Payment receipt email dispatch error:', err);
-      }
+    const resData = await orderRes.json();
+    if (!orderRes.ok) {
+      throw new Error(resData.error || 'Failed to place order.');
     }
 
-    const newOrder: Order = {
-      id: orderId,
-      orderNumber: orderNum,
-      userId: firebaseUser?.uid || 'guest-checkout',
-      customerName: payload.customerName.slice(0, 140),
-      customerEmail: payload.customerEmail.slice(0, 250),
-      ...(payload.customerPhone ? { customerPhone: payload.customerPhone.slice(0, 40) } : {}),
-      destCountryIso,
-      status: initialOrderStatus,
-      paymentStatus: isQuoteRequest ? 'PENDING' : paymentResult.paymentStatus,
-      paymentMethod: payload.paymentMethod,
-      ...(payload.paymentSubMethod ? { paymentSubMethod: payload.paymentSubMethod.slice(0, 50) } : {}),
-      ...(payload.paymentReference ? { paymentReference: payload.paymentReference.slice(0, 100) } : {}),
-      ...(payload.paymentProofDetails ? { paymentProofDetails: payload.paymentProofDetails.slice(0, 300) } : {}),
-      subtotal: Number(subtotal.toFixed(2)),
-      discount: Number(discount.toFixed(2)),
-      tax,
-      shippingFee: Number(verifiedShippingFee.toFixed(2)),
-      total,
-      currency: settings.currency,
-      exchangeRateSnapshot: settings.usdToPkrRate || 278.5,
-      ...(appliedCoupon && !isQuoteRequest ? { couponCode: appliedCoupon.code } : {}),
-      ...(payload.district ? { district: payload.district.slice(0, 80) } : {}),
-      ...(payload.tehsil ? { tehsil: payload.tehsil.slice(0, 80) } : {}),
-      shippingAddressSummary: payload.shippingAddressSummary.slice(0, 480),
-      shippingCalculationSnapshot: shippingSnapshot,
-      notes: combinedNotes,
-      createdAt: new Date().toISOString(),
-      ...(isAdvancePaymentPaid
-        ? {
-            paymentReceiptEmailSent: true,
-            paymentReceiptEmailSentAt: new Date().toISOString(),
-            paymentReceiptEmailSubject: emailReceiptSubject,
-            paymentReceiptEmailRecipient: payload.customerEmail,
-            paymentReceiptEmailHtml: emailReceiptHtml,
-          }
-        : {}),
-    };
+    const createdOrder: Order = resData.order;
 
-    if (firebaseUser) {
+    // Persist guest tracking credentials in localStorage so guests can track anytime
+    if (resData.orderAccessToken) {
       try {
-        await setDoc(doc(db, 'orders', orderId), newOrder);
-        await pushNotification(
-          isAdvancePaymentPaid ? 'PAYMENT_RECEIVED' : 'NEW_ORDER',
-          isAdvancePaymentPaid
-            ? `Payment Recieved · ${orderNum} | ${settings.storeName || 'Atelier Aurelia'}`
-            : isQuoteRequest
-            ? `Quote Request ${orderNum}`
-            : `Order ${orderNum} Confirmed`,
-          isAdvancePaymentPaid
-            ? `Apki payment ba-hifazat recieve ho chuki hy. Amount: ${settings.currency} ${total.toLocaleString()}. Gmail confirmation sent to ${payload.customerEmail} from ${settings.storeName || 'Atelier Aurelia'}.`
-            : `${payload.customerName} submitted ${isQuoteRequest ? 'an International Quote Request' : `an order for ${total.toFixed(2)} ${settings.currency}`}.`
+        localStorage.setItem(
+          'atelier_latest_order',
+          JSON.stringify({
+            orderNumber: createdOrder.orderNumber,
+            orderAccessToken: resData.orderAccessToken,
+          })
         );
-      } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, `orders/${orderId}`);
-      }
-    } else {
-      // Guest order saved in local state so guest sees immediate confirmation & order timeline
-      setOrders((prev) => [newOrder, ...prev]);
+      } catch {}
     }
 
-    // Decrement stock only if not a pending quote request
-    if (!isQuoteRequest) {
-      for (const item of cart) {
-        const targetProd = products.find((p) => p.id === item.productId);
-        if (targetProd) {
-          const nextStock = Math.max(0, targetProd.stock - item.quantity);
-          if (isAdmin && firebaseUser) {
-            try {
-              await setDoc(doc(db, 'products', targetProd.id), {
-                ...targetProd,
-                stock: nextStock,
-                updatedAt: new Date().toISOString(),
-              });
-            } catch {
-              // ignore
-            }
-          } else {
-            setProducts((prev) =>
-              prev.map((p) => (p.id === targetProd.id ? { ...p, stock: nextStock } : p))
-            );
-          }
-        }
-      }
-    }
+    // Update local state with the authoritative server-created order
+    setOrders((prev) => {
+      const exists = prev.some((o) => o.id === createdOrder.id || o.orderNumber === createdOrder.orderNumber);
+      return exists ? prev : [createdOrder, ...prev];
+    });
+
+    // Notify user of order submission
+    await pushNotification(
+      'NEW_ORDER',
+      `Order ${createdOrder.orderNumber} Recorded`,
+      `${payload.customerName} submitted an order for ${settings.currency} ${createdOrder.total.toLocaleString()}.`
+    );
 
     clearCart();
-    return newOrder;
+    return createdOrder;
   };
 
   // Verify Manual Payment Workflow (Admin Only, Server and Local State Synchronized)
@@ -1606,29 +1470,27 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       updatedAt: new Date().toISOString(),
     };
 
-    // Restore inventory when an active order is cancelled or refunded for the first time
+    // Authoritative stock restoration on server when an order is cancelled
     if (
       !wasAlreadyCancelledOrRefunded &&
-      (status === 'CANCELLED' || status === 'REFUNDED') &&
-      target.notes
+      status === 'CANCELLED'
     ) {
-      const match = /\[Items:\s*([^\]]+)\]/i.exec(target.notes);
-      if (match && match[1]) {
-        const pairs = match[1].split(',').map((s) => s.trim());
-        for (const pair of pairs) {
-          const [skuPart, qtyPart] = pair.split('x');
-          const qty = Number(qtyPart || 0);
-          const prod = products.find(
-            (p) => p.sku.toLowerCase() === (skuPart || '').trim().toLowerCase()
-          );
-          if (prod && qty > 0) {
-            await adjustInventory(
-              prod.id,
-              prod.stock + qty,
-              `Restored from ${status} Order ${target.orderNumber}`
-            );
-          }
-        }
+      try {
+        const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+        await fetch('/api/orders/cancel', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            orderId: target.id,
+            orderNumber: target.orderNumber,
+            reason: 'Cancelled by operator/customer',
+          }),
+        });
+      } catch (err) {
+        console.warn('Server order cancellation error:', err);
       }
     }
 

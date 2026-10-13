@@ -21,24 +21,21 @@ service cloud.firestore {
     }
 
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null;
     }
 
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isBootstrapSuperAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'mralun683@gmail.com' ||
-        request.auth.token.email == 'specialforme683@gmail.com' ||
-        request.auth.token.email == 'mahrmohsin683@gmail.com' ||
-        request.auth.token.email == 'aatech683@gmail.com'
-      );
+    function isSuperAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'SUPER_ADMIN';
     }
 
     function isAdmin() {
-      return isBootstrapSuperAdmin() || (
+      return isSuperAdmin() || (
         isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'PRODUCT_MANAGER', 'ORDER_MANAGER']
@@ -114,10 +111,14 @@ service cloud.firestore {
     function isValidOrder(data) {
       return data.keys().hasAll(['id', 'orderNumber', 'customerName', 'customerEmail', 'status', 'paymentStatus', 'paymentMethod', 'total', 'createdAt']) &&
         data.keys().hasOnly([
-          'id', 'orderNumber', 'userId', 'orderAccessToken', 'items', 'customerName', 'customerEmail',
-          'status', 'paymentStatus', 'paymentMethod', 'subtotal', 'discount',
-          'tax', 'shippingFee', 'total', 'couponCode', 'shippingAddressSummary',
-          'trackingNumber', 'notes', 'createdAt', 'updatedAt'
+          'id', 'orderNumber', 'userId', 'orderAccessToken', 'items', 'customerName', 'customerEmail', 'customerPhone', 'destCountryIso',
+          'status', 'paymentStatus', 'paymentMethod', 'paymentSubMethod', 'paymentReference', 'paymentProofDetails',
+          'paymentVerifiedBy', 'paymentVerifiedAt', 'paymentVerificationNote', 'paymentReceiptEmailSent', 'paymentReceiptEmailSentAt',
+          'paymentReceiptEmailSubject', 'paymentReceiptEmailRecipient', 'paymentReceiptEmailHtml',
+          'subtotal', 'discount', 'tax', 'shippingFee', 'total', 'currency', 'exchangeRateSnapshot',
+          'couponCode', 'shippingAddressSummary', 'shippingCalculationSnapshot',
+          'trackingNumber', 'courierName', 'quoteAmount', 'quoteCourier', 'quoteEstimatedDays',
+          'quoteCustomsMode', 'quoteAdminNotes', 'quoteExpiresAt', 'district', 'tehsil', 'city', 'notes', 'createdAt', 'updatedAt'
         ]) &&
         data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
         data.orderNumber is string && data.orderNumber.size() >= 1 && data.orderNumber.size() <= 64 &&
@@ -126,17 +127,43 @@ service cloud.firestore {
         (!('items' in data) || data.items is list) &&
         data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 150 &&
         data.customerEmail is string && data.customerEmail.size() >= 3 && data.customerEmail.size() <= 255 &&
-        data.status is string && data.status in ['PENDING', 'CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED', 'REFUNDED', 'RETURNED'] &&
-        data.paymentStatus is string && data.paymentStatus in ['PENDING', 'PENDING_VERIFICATION', 'PAID', 'FAILED', 'REFUNDED'] &&
-        data.paymentMethod is string && data.paymentMethod in ['COD', 'NAYAPAY', 'RAAST_IBAN', 'BANK_TRANSFER', 'MANUAL', 'MANUAL_QUOTE'] &&
+        (!('customerPhone' in data) || (data.customerPhone is string && data.customerPhone.size() <= 50)) &&
+        (!('destCountryIso' in data) || (data.destCountryIso is string && data.destCountryIso.size() <= 10)) &&
+        data.status is string && data.status in [
+          'PENDING', 'CONFIRMED', 'PROCESSING', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY',
+          'DELIVERED', 'CANCELLED', 'REFUNDED', 'RETURNED',
+          'QUOTE_REQUESTED', 'QUOTE_READY', 'QUOTE_ACCEPTED', 'QUOTE_REJECTED', 'QUOTE_EXPIRED'
+        ] &&
+        data.paymentStatus is string && data.paymentStatus in [
+          'PENDING', 'PENDING_VERIFICATION', 'PAID', 'FAILED', 'REFUND_PENDING', 'REFUNDED', 'PARTIALLY_REFUNDED'
+        ] &&
+        data.paymentMethod is string && data.paymentMethod in [
+          'COD', 'NAYAPAY', 'RAAST_IBAN', 'BANK_TRANSFER', 'MANUAL', 'MANUAL_QUOTE'
+        ] &&
+        (!('paymentSubMethod' in data) || (data.paymentSubMethod is string && data.paymentSubMethod.size() <= 60)) &&
+        (!('paymentReference' in data) || (data.paymentReference is string && data.paymentReference.size() <= 120)) &&
+        (!('paymentProofDetails' in data) || (data.paymentProofDetails is string && data.paymentProofDetails.size() <= 400)) &&
+        (!('paymentVerifiedBy' in data) || (data.paymentVerifiedBy is string && data.paymentVerifiedBy.size() <= 150)) &&
+        (!('paymentVerifiedAt' in data) || (data.paymentVerifiedAt is string && data.paymentVerifiedAt.size() <= 64)) &&
+        (!('paymentVerificationNote' in data) || (data.paymentVerificationNote is string && data.paymentVerificationNote.size() <= 500)) &&
         (!('subtotal' in data) || (data.subtotal is number && data.subtotal >= 0)) &&
         (!('discount' in data) || (data.discount is number && data.discount >= 0)) &&
         (!('tax' in data) || (data.tax is number && data.tax >= 0)) &&
         (!('shippingFee' in data) || (data.shippingFee is number && data.shippingFee >= 0)) &&
         data.total is number && data.total >= 0 &&
+        (!('currency' in data) || (data.currency is string && data.currency.size() <= 10)) &&
+        (!('exchangeRateSnapshot' in data) || (data.exchangeRateSnapshot is number && data.exchangeRateSnapshot > 0)) &&
         (!('couponCode' in data) || (data.couponCode is string && data.couponCode.size() <= 64)) &&
         (!('shippingAddressSummary' in data) || (data.shippingAddressSummary is string && data.shippingAddressSummary.size() <= 500)) &&
+        (!('shippingCalculationSnapshot' in data) || (data.shippingCalculationSnapshot is map)) &&
         (!('trackingNumber' in data) || (data.trackingNumber is string && data.trackingNumber.size() <= 120)) &&
+        (!('courierName' in data) || (data.courierName is string && data.courierName.size() <= 100)) &&
+        (!('quoteAmount' in data) || (data.quoteAmount is number && data.quoteAmount >= 0)) &&
+        (!('quoteCourier' in data) || (data.quoteCourier is string && data.quoteCourier.size() <= 100)) &&
+        (!('quoteEstimatedDays' in data) || (data.quoteEstimatedDays is string && data.quoteEstimatedDays.size() <= 100)) &&
+        (!('quoteCustomsMode' in data) || (data.quoteCustomsMode is string && data.quoteCustomsMode in ['NOT_APPLICABLE', 'DAP', 'DDP'])) &&
+        (!('quoteAdminNotes' in data) || (data.quoteAdminNotes is string && data.quoteAdminNotes.size() <= 1000)) &&
+        (!('quoteExpiresAt' in data) || (data.quoteExpiresAt is string && data.quoteExpiresAt.size() <= 64)) &&
         (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
         data.createdAt is string && data.createdAt.size() <= 64 &&
         (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
@@ -218,34 +245,30 @@ service cloud.firestore {
 
     function isValidSetting(data) {
       return data.keys().hasAll(['id', 'storeName', 'contactEmail', 'currency', 'taxRate']) &&
-        data.keys().hasOnly(['id', 'storeName', 'contactEmail', 'currency', 'taxRate', 'freeShippingThreshold', 'flatShippingRate', 'guestCheckoutEnabled', 'aiTone', 'updatedAt']) &&
         data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
         data.storeName is string && data.storeName.size() >= 1 && data.storeName.size() <= 120 &&
         data.contactEmail is string && data.contactEmail.size() >= 3 && data.contactEmail.size() <= 255 &&
         data.currency is string && data.currency.size() >= 1 && data.currency.size() <= 10 &&
         data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 100 &&
-        (!('freeShippingThreshold' in data) || (data.freeShippingThreshold is number && data.freeShippingThreshold >= 0)) &&
-        (!('flatShippingRate' in data) || (data.flatShippingRate is number && data.flatShippingRate >= 0)) &&
         (!('guestCheckoutEnabled' in data) || data.guestCheckoutEnabled is bool) &&
-        (!('aiTone' in data) || (data.aiTone is string && data.aiTone in ['Professional', 'Premium', 'Friendly', 'Minimal', 'Luxury', 'Persuasive'])) &&
         (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
     // Collection 1: /users/{userId}
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isBootstrapSuperAdmin());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isSuperAdmin());
       allow create: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) &&
         incoming().uid == request.auth.uid &&
         userId == request.auth.uid &&
-        (incoming().role == 'CUSTOMER' || isBootstrapSuperAdmin());
+        (incoming().role == 'CUSTOMER' || isSuperAdmin());
       allow update: if isSignedIn() && isValidId(userId) && isValidUser(incoming()) &&
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt && (
-          isAdmin() ||
+          (isSuperAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'updatedAt'])) ||
           (isOwner(userId) && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt']))
         );
-      allow delete: if isValidId(userId) && isBootstrapSuperAdmin();
+      allow delete: if isValidId(userId) && isSuperAdmin();
     }
 
     // Collection 2: /products/{productId}
@@ -293,7 +316,7 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
           )
         );
-      allow delete: if isSignedIn() && isValidId(orderId) && isBootstrapSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(orderId) && isSuperAdmin();
     }
 
     // Collection 5: /coupons/{couponId}
@@ -350,7 +373,7 @@ service cloud.firestore {
         incoming().actorUid == existing().actorUid &&
         incoming().createdAt == existing().createdAt &&
         isAdmin();
-      allow delete: if isSignedIn() && isValidId(taskId) && isBootstrapSuperAdmin();
+      allow delete: if isSignedIn() && isValidId(taskId) && isSuperAdmin();
     }
 
     // Collection 9: /notifications/{notificationId}

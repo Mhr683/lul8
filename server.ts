@@ -8,11 +8,13 @@ import dotenv from 'dotenv';
 import { initializeApp as initAdminApp, getApps as getAdminApps } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestore } from 'firebase-admin/firestore';
+import { getStorage as getAdminStorage } from 'firebase-admin/storage';
 import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
 import { canExecuteAITool } from './src/ai/permissions';
 import { validateAIToolArgs } from './src/validation/validators';
-import { UserRole } from './src/types/store';
+import { UserRole, Order, OrderItem, OrderStatus, PaymentStatus } from './src/types/store';
 import { ShippingCalculationService } from './src/services/shippingService';
+import { INITIAL_SETTINGS, INITIAL_PRODUCTS, INITIAL_CATEGORIES, INITIAL_COUPONS } from './src/data/seedData';
 
 dotenv.config();
 
@@ -30,10 +32,14 @@ const adminApp = getAdminApps().length > 0
 
 const adminAuth = getAdminAuth(adminApp);
 const adminDb = getAdminFirestore(adminApp, firebaseConfig.firestoreDatabaseId || '(default)');
+const adminStorage = getAdminStorage(adminApp);
+const storageBucketName = firebaseConfig.storageBucket || `${firebaseConfig.projectId}.appspot.com`;
+const adminBucket = adminStorage.bucket(storageBucketName);
 
 const admin = {
   auth: () => adminAuth,
   firestore: () => adminDb,
+  storage: () => adminStorage,
 };
 
 const ALLOWED_ADMIN_ROLES = [
@@ -166,15 +172,6 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '10mb' }));
-
-// Dedicated persistent local media storage for CSV imports and product assets
-const MEDIA_DIR = path.join(process.cwd(), 'data', 'media');
-if (!fs.existsSync(MEDIA_DIR)) {
-  fs.mkdirSync(MEDIA_DIR, { recursive: true });
-}
-
-// Serve permanently downloaded product images
-app.use('/uploads', express.static(MEDIA_DIR, { maxAge: '30d' }));
 
 // Simple per-IP in-memory rate limiter for AI endpoints
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -512,15 +509,37 @@ const storeToolDeclarations: FunctionDeclaration[] = [
   },
 ];
 
-// Robust Remote Image Ingestion: Downloads external images into local store storage so links never break
-async function downloadAndStoreImage(url: string): Promise<{ success: boolean; localUrl: string; error?: string }> {
+// Robust Remote Image Ingestion: Uploads images to Firebase Storage and returns public download URLs
+async function uploadBufferToFirebaseStorage(
+  buffer: Buffer,
+  fileName: string,
+  contentType: string
+): Promise<string> {
+  const destinationPath = `products/${fileName}`;
+  const file = adminBucket.file(destinationPath);
+  const downloadToken = crypto.randomUUID();
+
+  await file.save(buffer, {
+    contentType,
+    resumable: false,
+    metadata: {
+      metadata: {
+        firebaseStorageDownloadTokens: downloadToken,
+      },
+    },
+  });
+
+  return `https://firebasestorage.googleapis.com/v0/b/${adminBucket.name}/o/${encodeURIComponent(destinationPath)}?alt=media&token=${downloadToken}`;
+}
+
+async function downloadAndStoreImage(url: string): Promise<{ success: boolean; localUrl: string; publicUrl: string; error?: string }> {
   try {
     if (!url || typeof url !== 'string') {
-      return { success: false, localUrl: url };
+      return { success: false, localUrl: url, publicUrl: url };
     }
     const trimmed = url.trim();
-    if (trimmed.startsWith('/uploads/') || trimmed.startsWith('/images/')) {
-      return { success: true, localUrl: trimmed };
+    if (trimmed.startsWith('https://firebasestorage.googleapis.com/') || trimmed.startsWith('https://storage.googleapis.com/')) {
+      return { success: true, localUrl: trimmed, publicUrl: trimmed };
     }
 
     // Handle Data URLs
@@ -528,26 +547,22 @@ async function downloadAndStoreImage(url: string): Promise<{ success: boolean; l
       const match = trimmed.match(/^data:image\/([a-zA-Z0-9\+\-\.]+);base64,(.+)$/);
       if (match) {
         const ext = match[1] === 'jpeg' ? 'jpg' : match[1].replace(/[^a-z0-9]/gi, '');
+        const mimeType = `image/${match[1] === 'jpg' ? 'jpeg' : match[1]}`;
         const buffer = Buffer.from(match[2], 'base64');
         const hash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 16);
         const fileName = `${hash}.${ext || 'jpg'}`;
-        const filePath = path.join(MEDIA_DIR, fileName);
-        if (!fs.existsSync(filePath)) {
-          fs.writeFileSync(filePath, buffer);
+        try {
+          const publicUrl = await uploadBufferToFirebaseStorage(buffer, fileName, mimeType);
+          return { success: true, localUrl: publicUrl, publicUrl };
+        } catch (uploadErr: any) {
+          console.warn('[Firebase Storage upload warning]:', uploadErr?.message);
+          return { success: false, localUrl: trimmed, publicUrl: trimmed, error: uploadErr?.message };
         }
-        return { success: true, localUrl: `/uploads/${fileName}` };
       }
     }
 
     if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
-      return { success: false, localUrl: trimmed };
-    }
-
-    // Deduplicate identical images by URL hash
-    const urlHash = crypto.createHash('sha256').update(trimmed).digest('hex').slice(0, 16);
-    const existing = fs.readdirSync(MEDIA_DIR).find((f) => f.startsWith(urlHash));
-    if (existing) {
-      return { success: true, localUrl: `/uploads/${existing}` };
+      return { success: false, localUrl: trimmed, publicUrl: trimmed };
     }
 
     const controller = new AbortController();
@@ -563,10 +578,10 @@ async function downloadAndStoreImage(url: string): Promise<{ success: boolean; l
 
     if (!response.ok) {
       console.warn(`[Image Archiver] Could not fetch remote URL ${trimmed} (Status ${response.status})`);
-      return { success: false, localUrl: trimmed, error: `HTTP ${response.status}` };
+      return { success: false, localUrl: trimmed, publicUrl: trimmed, error: `HTTP ${response.status}` };
     }
 
-    const contentType = response.headers.get('content-type') || '';
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
     let ext = 'jpg';
     if (contentType.includes('png')) ext = 'png';
     else if (contentType.includes('webp')) ext = 'webp';
@@ -587,25 +602,29 @@ async function downloadAndStoreImage(url: string): Promise<{ success: boolean; l
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     if (buffer.length < 50) {
-      return { success: false, localUrl: trimmed, error: 'Empty image content' };
+      return { success: false, localUrl: trimmed, publicUrl: trimmed, error: 'Empty image content' };
     }
 
+    const urlHash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 16);
     const fileName = `${urlHash}.${ext}`;
-    const filePath = path.join(MEDIA_DIR, fileName);
-    fs.writeFileSync(filePath, buffer);
-
-    console.log(`[Image Archiver] Saved external image to permanent store storage: ${trimmed.slice(0, 60)}... -> /uploads/${fileName} (${(buffer.length / 1024).toFixed(1)} KB)`);
-    return { success: true, localUrl: `/uploads/${fileName}` };
+    try {
+      const publicUrl = await uploadBufferToFirebaseStorage(buffer, fileName, contentType);
+      console.log(`[Firebase Storage] Uploaded image to Firebase Storage: ${trimmed.slice(0, 60)}... -> ${publicUrl}`);
+      return { success: true, localUrl: publicUrl, publicUrl };
+    } catch (uploadErr: any) {
+      console.warn('[Firebase Storage upload warning]:', uploadErr?.message);
+      return { success: false, localUrl: trimmed, publicUrl: trimmed, error: uploadErr?.message };
+    }
   } catch (err: any) {
     console.error(`[Image Archiver] Error archiving ${url}:`, err?.message);
-    return { success: false, localUrl: url, error: err?.message };
+    return { success: false, localUrl: url, publicUrl: url, error: err?.message };
   }
 }
 
 // 0. Protect all /api/media/* endpoints with requireAdmin middleware
 app.use('/api/media', requireAdmin);
 
-// 0. API Endpoint: Download and store a single external image locally
+// 0. API Endpoint: Download and store a single external image in Firebase Storage
 app.post('/api/media/download-and-store', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'url is required' });
@@ -613,7 +632,30 @@ app.post('/api/media/download-and-store', async (req, res) => {
   res.json(result);
 });
 
-// 0. API Endpoint: Batch download and archive multiple images (used for CSV Imports)
+// 0. API Endpoint: Upload image directly to Firebase Storage
+app.post('/api/media/upload', async (req, res) => {
+  try {
+    const { dataUrl, filename, mimeType } = req.body;
+    if (!dataUrl) {
+      return res.status(400).json({ error: 'dataUrl is required' });
+    }
+    const match = String(dataUrl).match(/^data:image\/([a-zA-Z0-9\+\-\.]+);base64,(.+)$/);
+    if (!match) {
+      return res.status(400).json({ error: 'Invalid dataUrl image format' });
+    }
+    const ext = match[1] === 'jpeg' ? 'jpg' : match[1].replace(/[^a-z0-9]/gi, '');
+    const buffer = Buffer.from(match[2], 'base64');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 16);
+    const resolvedFileName = filename ? `${hash}_${path.basename(filename)}` : `${hash}.${ext || 'jpg'}`;
+    const publicUrl = await uploadBufferToFirebaseStorage(buffer, resolvedFileName, mimeType || `image/${ext}`);
+    return res.json({ success: true, publicUrl, url: publicUrl, localUrl: publicUrl });
+  } catch (err: any) {
+    console.error('Media upload error:', err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 0. API Endpoint: Batch download and archive multiple images to Firebase Storage
 app.post('/api/media/batch-download', async (req, res) => {
   const { urls } = req.body;
   if (!Array.isArray(urls)) {
@@ -628,7 +670,7 @@ app.post('/api/media/batch-download', async (req, res) => {
     await Promise.all(
       batch.map(async (u) => {
         const itemRes = await downloadAndStoreImage(u);
-        results[u] = itemRes.localUrl;
+        results[u] = itemRes.publicUrl || itemRes.localUrl;
       })
     );
   }
@@ -636,122 +678,121 @@ app.post('/api/media/batch-download', async (req, res) => {
   res.json({ success: true, count: validUrls.length, results });
 });
 
-// Persistent Catalog File Storage (Guarantees CSV imports and products never disappear on refresh)
-const CATALOG_FILE = path.join(process.cwd(), 'data', 'catalog_products.json');
-const CATEGORIES_FILE = path.join(process.cwd(), 'data', 'catalog_categories.json');
+// ============================================================================
+// STATELESS FIRESTORE CATALOG ENDPOINTS (Firestore is the ONLY source of truth)
+// ============================================================================
 
-app.get('/api/catalog/products', (req, res) => {
+app.get('/api/catalog/products', async (req, res) => {
   try {
-    if (fs.existsSync(CATALOG_FILE)) {
-      const raw = fs.readFileSync(CATALOG_FILE, 'utf-8');
-      const products = JSON.parse(raw);
-      return res.json({ success: true, products });
+    const snap = await adminDb.collection('products').get();
+    let products = snap.docs.map((d) => d.data());
+
+    // Auto-seed INITIAL_PRODUCTS if collection is empty
+    if (products.length === 0 && Array.isArray(INITIAL_PRODUCTS) && INITIAL_PRODUCTS.length > 0) {
+      console.log('Seeding initial products to Firestore...');
+      const batch = adminDb.batch();
+      for (const p of INITIAL_PRODUCTS) {
+        batch.set(adminDb.collection('products').doc(p.id), p);
+      }
+      await batch.commit();
+      products = [...INITIAL_PRODUCTS];
     }
-    return res.json({ success: true, products: [] });
+
+    return res.json({ success: true, products });
   } catch (err: any) {
+    console.error('Error fetching products from Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message, products: [] });
   }
 });
 
-app.post('/api/catalog/products/batch', requireAdmin, (req, res) => {
+app.post('/api/catalog/products/batch', requireAdmin, async (req, res) => {
   try {
     const { products } = req.body;
     if (!Array.isArray(products)) {
       return res.status(400).json({ error: 'products array is required' });
     }
-    let existingList: any[] = [];
-    if (fs.existsSync(CATALOG_FILE)) {
-      try {
-        existingList = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
-      } catch {}
-    }
-    const map = new Map<string, any>();
-    for (const p of existingList) {
-      if (p && p.id) map.set(p.id, p);
-    }
+
+    const batch = adminDb.batch();
     for (const p of products) {
-      if (p && p.id) map.set(p.id, p);
+      if (p && p.id) {
+        batch.set(adminDb.collection('products').doc(p.id), p, { merge: true });
+      }
     }
-    const merged = Array.from(map.values());
-    fs.writeFileSync(CATALOG_FILE, JSON.stringify(merged, null, 2), 'utf-8');
-    return res.json({ success: true, count: merged.length });
+    await batch.commit();
+    return res.json({ success: true, count: products.length });
   } catch (err: any) {
+    console.error('Error batch saving products to Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-app.post('/api/catalog/products/save', requireAdmin, (req, res) => {
+app.post('/api/catalog/products/save', requireAdmin, async (req, res) => {
   try {
     const product = req.body;
     if (!product || !product.id) {
       return res.status(400).json({ error: 'Valid product with id is required' });
     }
-    let list: any[] = [];
-    if (fs.existsSync(CATALOG_FILE)) {
-      try {
-        list = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
-      } catch {}
-    }
-    const idx = list.findIndex((p) => p.id === product.id || (p.sku && product.sku && p.sku.toLowerCase() === product.sku.toLowerCase()));
-    if (idx >= 0) {
-      list[idx] = product;
-    } else {
-      list.unshift(product);
-    }
-    fs.writeFileSync(CATALOG_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    await adminDb.collection('products').doc(product.id).set(product, { merge: true });
     return res.json({ success: true, product });
   } catch (err: any) {
+    console.error('Error saving product to Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-app.delete('/api/catalog/products/:id', requireAdmin, (req, res) => {
+app.delete('/api/catalog/products/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    if (!fs.existsSync(CATALOG_FILE)) return res.json({ success: true });
-    let list: any[] = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
-    list = list.filter((p) => p.id !== id);
-    fs.writeFileSync(CATALOG_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    await adminDb.collection('products').doc(id).delete();
     return res.json({ success: true });
   } catch (err: any) {
+    console.error('Error deleting product from Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-app.get('/api/catalog/categories', (req, res) => {
+app.get('/api/catalog/categories', async (req, res) => {
   try {
-    if (fs.existsSync(CATEGORIES_FILE)) {
-      const raw = fs.readFileSync(CATEGORIES_FILE, 'utf-8');
-      return res.json({ success: true, categories: JSON.parse(raw) });
+    const snap = await adminDb.collection('categories').get();
+    let categories = snap.docs.map((d) => d.data());
+
+    // Auto-seed INITIAL_CATEGORIES if collection is empty
+    if (categories.length === 0 && Array.isArray(INITIAL_CATEGORIES) && INITIAL_CATEGORIES.length > 0) {
+      console.log('Seeding initial categories to Firestore...');
+      const batch = adminDb.batch();
+      for (const c of INITIAL_CATEGORIES) {
+        batch.set(adminDb.collection('categories').doc(c.id), c);
+      }
+      await batch.commit();
+      categories = [...INITIAL_CATEGORIES];
     }
-    return res.json({ success: true, categories: [] });
+
+    return res.json({ success: true, categories });
   } catch (err: any) {
+    console.error('Error fetching categories from Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message, categories: [] });
   }
 });
 
-app.post('/api/catalog/categories/save', requireAdmin, (req, res) => {
+app.post('/api/catalog/categories/save', requireAdmin, async (req, res) => {
   try {
     const { category, categories } = req.body;
-    let list: any[] = [];
-    if (fs.existsSync(CATEGORIES_FILE)) {
-      try {
-        list = JSON.parse(fs.readFileSync(CATEGORIES_FILE, 'utf-8'));
-      } catch {}
-    }
     if (Array.isArray(categories)) {
-      const map = new Map<string, any>();
-      for (const c of list) if (c && c.id) map.set(c.id, c);
-      for (const c of categories) if (c && c.id) map.set(c.id, c);
-      list = Array.from(map.values());
+      const batch = adminDb.batch();
+      for (const c of categories) {
+        if (c && c.id) {
+          batch.set(adminDb.collection('categories').doc(c.id), c, { merge: true });
+        }
+      }
+      await batch.commit();
+      return res.json({ success: true, count: categories.length });
     } else if (category && category.id) {
-      const idx = list.findIndex((c) => c.id === category.id || c.name === category.name);
-      if (idx >= 0) list[idx] = category;
-      else list.push(category);
+      await adminDb.collection('categories').doc(category.id).set(category, { merge: true });
+      return res.json({ success: true, count: 1 });
     }
-    fs.writeFileSync(CATEGORIES_FILE, JSON.stringify(list, null, 2), 'utf-8');
-    return res.json({ success: true, count: list.length });
+    return res.status(400).json({ error: 'category or categories array is required' });
   } catch (err: any) {
+    console.error('Error saving categories to Firestore:', err);
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
@@ -1613,7 +1654,11 @@ app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
 
   // Use the verified token's email as verifiedBy
   const authUser = (req as any).user;
-  const adminEmail = authUser?.email || 'admin@atelieraurelia.com';
+  const adminEmail = authUser?.email;
+
+  if (!adminEmail) {
+    return res.status(401).json({ error: 'Unauthorized: User email not found in verified token.' });
+  }
 
   try {
     // Read the order from Firestore with firebase-admin
@@ -1634,7 +1679,11 @@ app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
       }
     }
 
-    const dbOrder = orderDoc.exists ? orderDoc.data() : null;
+    if (!orderDoc.exists) {
+      return res.status(404).json({ error: 'Order not found in Firestore.' });
+    }
+
+    const dbOrder = orderDoc.data();
     const effectiveCustomerEmail = dbOrder?.customerEmail || customerEmail;
 
     // Security Check: Prevent customer self-approval of manual payments
@@ -1694,16 +1743,14 @@ app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
     };
 
     // Update the order in Firestore with firebase-admin
-    if (orderDoc.exists) {
-      await orderTargetRef.update({
-        paymentStatus: nextPaymentStatus,
-        status: nextOrderStatus,
-        paymentVerifiedBy: adminEmail,
-        paymentVerifiedAt: now,
-        paymentVerificationNote: verificationRecord.note,
-        updatedAt: now,
-      });
-    }
+    await orderTargetRef.update({
+      paymentStatus: nextPaymentStatus,
+      status: nextOrderStatus,
+      paymentVerifiedBy: adminEmail,
+      paymentVerifiedAt: now,
+      paymentVerificationNote: verificationRecord.note,
+      updatedAt: now,
+    });
 
     res.json({
       success: true,
@@ -1722,6 +1769,705 @@ app.post('/api/admin/verify-payment', requireAdmin, async (req, res) => {
   } catch (err: any) {
     console.error('Error in /api/admin/verify-payment with Firestore:', err);
     return res.status(500).json({ error: 'Failed to process payment verification in database.' });
+  }
+});
+
+// 6.1. POST /api/orders/create (Atomic Server-Side Order Placement)
+app.post('/api/orders/create', async (req, res) => {
+  try {
+    const {
+      items,
+      couponCode,
+      customerName,
+      customerPhone,
+      customerEmail,
+      shippingAddress,
+      paymentMethod,
+      tid,
+      notes,
+      destCountryIso,
+    } = req.body;
+
+    // Optional Firebase ID token for logged-in users; guest if missing
+    let userId: string | null = null;
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (token) {
+        try {
+          const decoded = await admin.auth().verifyIdToken(token);
+          userId = decoded.uid;
+        } catch (authErr: any) {
+          return res.status(401).json({
+            error: 'Invalid or expired authentication token. Please sign in again or place order as guest.',
+            code: 'AUTH_TOKEN_INVALID',
+          });
+        }
+      }
+    }
+
+    // 1. Validate Pakistani mobile number (03XXXXXXXXX - 11 digits)
+    let cleanPhone = (customerPhone || '').toString().trim().replace(/[\s\-\(\)]/g, '');
+    if (cleanPhone.startsWith('+92')) {
+      cleanPhone = '0' + cleanPhone.slice(3);
+    } else if (cleanPhone.startsWith('92') && cleanPhone.length === 12) {
+      cleanPhone = '0' + cleanPhone.slice(2);
+    }
+    const pkPhoneRegex = /^03\d{9}$/;
+    if (!pkPhoneRegex.test(cleanPhone)) {
+      return res.status(400).json({
+        error: 'Invalid Pakistani mobile number. Must be 11 digits in the format 03XXXXXXXXX (e.g., 03001234567).',
+        code: 'INVALID_PHONE_NUMBER',
+      });
+    }
+
+    // 2. Validate full street address and city
+    let addressLine = '';
+    let city = (req.body.city || '').toString().trim();
+    let district = (req.body.district || '').toString().trim();
+    let tehsil = (req.body.tehsil || '').toString().trim();
+
+    if (typeof shippingAddress === 'object' && shippingAddress !== null) {
+      addressLine = (shippingAddress.address || shippingAddress.streetAddress || shippingAddress.summary || '').toString().trim();
+      city = city || (shippingAddress.city || shippingAddress.district || '').toString().trim();
+      district = district || (shippingAddress.district || '').toString().trim();
+      tehsil = tehsil || (shippingAddress.tehsil || '').toString().trim();
+    } else if (typeof shippingAddress === 'string') {
+      addressLine = shippingAddress.trim();
+    }
+
+    if (!city && district) city = district;
+
+    if (!addressLine || addressLine.length < 5) {
+      return res.status(400).json({
+        error: 'Full delivery street address is required (minimum 5 characters).',
+        code: 'MISSING_ADDRESS',
+      });
+    }
+
+    if (!city || city.length < 2) {
+      return res.status(400).json({
+        error: 'City name is required.',
+        code: 'MISSING_CITY',
+      });
+    }
+
+    // 3. Validate items
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        error: 'Order must contain at least one item.',
+        code: 'EMPTY_CART',
+      });
+    }
+
+    for (const it of items) {
+      if (!it.productId || typeof it.productId !== 'string' || !it.quantity || it.quantity < 1 || !Number.isInteger(it.quantity)) {
+        return res.status(400).json({
+          error: 'Each item must have a valid productId and a positive integer quantity.',
+          code: 'INVALID_ITEM',
+        });
+      }
+    }
+
+    // 4. Validate customer identity
+    if (!customerName || typeof customerName !== 'string' || customerName.trim().length < 2) {
+      return res.status(400).json({
+        error: 'Customer name is required (minimum 2 characters).',
+        code: 'INVALID_CUSTOMER_NAME',
+      });
+    }
+
+    if (!customerEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(customerEmail).trim())) {
+      return res.status(400).json({
+        error: 'A valid customer email address is required.',
+        code: 'INVALID_CUSTOMER_EMAIL',
+      });
+    }
+
+    // 5. Validate payment method
+    const allowedPaymentMethods = ['COD', 'NAYAPAY', 'RAAST_IBAN', 'MANUAL_QUOTE'];
+    if (!allowedPaymentMethods.includes(paymentMethod)) {
+      return res.status(400).json({
+        error: `Invalid payment method "${paymentMethod}". Allowed options: ${allowedPaymentMethods.join(', ')}.`,
+        code: 'INVALID_PAYMENT_METHOD',
+      });
+    }
+
+    const isDomestic = (destCountryIso || 'PK').toString().toUpperCase() === 'PK';
+    if (paymentMethod === 'COD' && !isDomestic) {
+      return res.status(400).json({
+        error: 'Cash on Delivery (COD) is strictly restricted to Pakistan domestic destinations.',
+        code: 'COD_NOT_ALLOWED',
+      });
+    }
+
+    if (['NAYAPAY', 'RAAST_IBAN'].includes(paymentMethod) && (!tid || !String(tid).trim())) {
+      return res.status(400).json({
+        error: 'Transaction reference (TID) is required for advance manual transfer.',
+        code: 'MISSING_TID',
+      });
+    }
+
+    // 6. Execute atomic Firestore Transaction with firebase-admin (with local persistence fallback if ADC is unconfigured in container)
+    let result: { orderId: string; orderNumber: string; orderAccessToken: string; order: Order };
+    try {
+      result = await adminDb.runTransaction(async (transaction) => {
+        // Step A: Read each product and verify stock & active status
+        const productDocs: Array<{ ref: FirebaseFirestore.DocumentReference; data: any; reqQty: number }> = [];
+        for (const item of items) {
+          const prodRef = adminDb.collection('products').doc(item.productId);
+          const prodDoc = await transaction.get(prodRef);
+          if (!prodDoc.exists) {
+            throw new Error(`Product "${item.productId}" not found in catalog.`);
+          }
+          const pData = prodDoc.data();
+          if (!pData || pData.status !== 'ACTIVE') {
+            throw new Error(`Product "${pData?.name || item.productId}" is not active or available for sale.`);
+          }
+          if (typeof pData.stock !== 'number' || pData.stock < item.quantity) {
+            throw new Error(`Insufficient stock for "${pData.name}". Available: ${pData.stock ?? 0}, Requested: ${item.quantity}.`);
+          }
+          productDocs.push({ ref: prodRef, data: pData, reqQty: item.quantity });
+        }
+
+        // Step B: Read store settings
+        const settingsRef = adminDb.collection('settings').doc('store_config');
+        const settingsDoc = await transaction.get(settingsRef);
+        const storeSettings = settingsDoc.exists ? settingsDoc.data() : INITIAL_SETTINGS;
+
+        // Step C: Read coupon if provided
+        let couponData: any = null;
+        if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+          const cQuery = adminDb.collection('coupons').where('code', '==', couponCode.trim().toUpperCase()).limit(1);
+          const cSnap = await transaction.get(cQuery);
+          if (!cSnap.empty) {
+            const cd = cSnap.docs[0].data();
+            if (cd.active !== false) {
+              couponData = cd;
+            }
+          }
+        }
+
+        // Step D: Recalculate price & subtotal
+        let merchandiseSubtotal = 0;
+        const orderItems: OrderItem[] = [];
+        for (const p of productDocs) {
+          const price = Number(p.data.price) || 0;
+          merchandiseSubtotal += price * p.reqQty;
+          orderItems.push({
+            productId: p.data.id || p.ref.id,
+            name: p.data.name,
+            sku: p.data.sku,
+            price,
+            quantity: p.reqQty,
+            image: p.data.primaryImage,
+          });
+        }
+        merchandiseSubtotal = Number(merchandiseSubtotal.toFixed(2));
+
+        // Step E: Recalculate coupon discount
+        let discount = 0;
+        let hasFreeShippingCoupon = false;
+        if (couponData && paymentMethod !== 'MANUAL_QUOTE') {
+          if (!couponData.minOrderAmount || merchandiseSubtotal >= couponData.minOrderAmount) {
+            if (couponData.type === 'PERCENTAGE') {
+              discount = (merchandiseSubtotal * (Number(couponData.value) || 0)) / 100;
+              if (couponData.maxDiscount) {
+                discount = Math.min(discount, Number(couponData.maxDiscount));
+              }
+            } else if (couponData.type === 'FIXED') {
+              discount = Math.min(merchandiseSubtotal, Number(couponData.value) || 0);
+            } else if (couponData.type === 'FREE_SHIPPING') {
+              hasFreeShippingCoupon = true;
+            }
+          }
+        }
+        discount = Number(discount.toFixed(2));
+
+        // Step F: Recalculate shipping using existing ShippingCalculationService
+        const isQuoteRequest = paymentMethod === 'MANUAL_QUOTE';
+        const shippingCalc = ShippingCalculationService.calculate({
+          destinationCountryIso: isDomestic ? 'PK' : (destCountryIso || 'PK'),
+          items: orderItems as any,
+          catalogProducts: productDocs.map((p) => p.data),
+          settings: (storeSettings as any) || INITIAL_SETTINGS,
+          hasFreeShippingCoupon,
+          merchandiseSubtotalPkr: merchandiseSubtotal,
+          discountPkr: discount,
+        });
+
+        const shippingFee = isQuoteRequest ? 0 : Number(shippingCalc.finalShippingFee.toFixed(2));
+        const taxable = Math.max(0, merchandiseSubtotal - discount);
+        const taxRate = isDomestic ? (Number(storeSettings?.taxRate) || 0) : 0;
+        const tax = Number(((taxable * taxRate) / 100).toFixed(2));
+        const total = Number((taxable + tax + shippingFee).toFixed(2));
+
+        // Step G: Decrement stock for each product
+        const now = new Date().toISOString();
+        for (const p of productDocs) {
+          const nextStock = Math.max(0, p.data.stock - p.reqQty);
+          transaction.update(p.ref, {
+            stock: nextStock,
+            updatedAt: now,
+          });
+        }
+
+        // Step H: Generate unique order number & guest tracking token
+        const orderNumber = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
+        const orderId = `ord-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        const orderAccessToken = crypto.randomBytes(24).toString('hex');
+
+        // Step I: Enforce status rules:
+        // COD -> status PENDING, paymentStatus PENDING; manual transfer -> PENDING_VERIFICATION; never PAID at creation.
+        let initialStatus: OrderStatus = 'PENDING';
+        let initialPaymentStatus: PaymentStatus = 'PENDING';
+
+        if (paymentMethod === 'COD') {
+          initialStatus = 'PENDING';
+          initialPaymentStatus = 'PENDING';
+        } else if (paymentMethod === 'MANUAL_QUOTE') {
+          initialStatus = 'QUOTE_REQUESTED';
+          initialPaymentStatus = 'PENDING';
+        } else {
+          // NAYAPAY, RAAST_IBAN
+          initialStatus = 'PENDING';
+          initialPaymentStatus = 'PENDING_VERIFICATION';
+        }
+
+        const fullAddressSummary = typeof shippingAddress === 'string'
+          ? shippingAddress
+          : `${addressLine}, ${city}${district && district !== city ? `, ${district}` : ''}${tehsil ? `, Tehsil: ${tehsil}` : ''}, Pakistan (Phone: ${cleanPhone})`;
+
+        const orderData: Order = {
+          id: orderId,
+          orderNumber,
+          userId: userId || null,
+          orderAccessToken,
+          items: orderItems,
+          customerName: (customerName || req.body.name || '').toString().trim(),
+          customerEmail: (customerEmail || req.body.email || '').toString().trim().toLowerCase(),
+          customerPhone: cleanPhone,
+          destCountryIso: isDomestic ? 'PK' : (destCountryIso || 'PK'),
+          status: initialStatus,
+          paymentStatus: initialPaymentStatus,
+          paymentMethod: paymentMethod as any,
+          ...((tid || req.body.paymentReference) ? { paymentReference: String(tid || req.body.paymentReference).trim() } : {}),
+          subtotal: merchandiseSubtotal,
+          discount,
+          tax,
+          shippingFee,
+          total,
+          currency: storeSettings?.currency || 'PKR',
+          exchangeRateSnapshot: Number(storeSettings?.usdToPkrRate) || 278.5,
+          ...(couponData ? { couponCode: couponData.code } : {}),
+          shippingAddressSummary: fullAddressSummary,
+          shippingCalculationSnapshot: ShippingCalculationService.createSnapshot(shippingCalc),
+          district: district || city,
+          tehsil: tehsil || '',
+          notes: (notes || `[Items: ${orderItems.map((i) => `${i.sku}x${i.quantity}`).join(', ')}] | [Method: ${paymentMethod}${tid ? ` · TID: ${tid}` : ''}]`).slice(0, 950),
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const orderRef = adminDb.collection('orders').doc(orderId);
+        transaction.set(orderRef, orderData);
+
+        return {
+          orderId,
+          orderNumber,
+          orderAccessToken,
+          order: orderData,
+        };
+      });
+    } catch (txnError: any) {
+      const isPermissionOrUnavailable =
+        txnError?.code === 7 ||
+        txnError?.code === 16 ||
+        txnError?.message?.includes('PERMISSION_DENIED') ||
+        txnError?.message?.includes('UNAUTHENTICATED');
+
+      if (!isPermissionOrUnavailable) {
+        throw txnError;
+      }
+
+      // Local Atomic Fallback when Firestore ADC is unconfigured in container
+      console.warn('Firestore ADC unavailable in container; executing atomic local catalog transaction.');
+      let catalogList: any[] = [];
+      if (fs.existsSync(CATALOG_FILE)) {
+        catalogList = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
+      }
+
+      const orderItems: OrderItem[] = [];
+      let merchandiseSubtotal = 0;
+
+      for (const item of items) {
+        const prod = catalogList.find((p) => p.id === item.productId || p.sku === item.productId);
+        if (!prod) {
+          throw new Error(`Product "${item.productId}" not found in catalog.`);
+        }
+        if (prod.status !== 'ACTIVE') {
+          throw new Error(`Product "${prod.name}" is not active or available for sale.`);
+        }
+        if (typeof prod.stock !== 'number' || prod.stock < item.quantity) {
+          throw new Error(`Insufficient stock for "${prod.name}". Available: ${prod.stock ?? 0}, Requested: ${item.quantity}.`);
+        }
+
+        const price = Number(prod.price) || 0;
+        merchandiseSubtotal += price * item.quantity;
+        orderItems.push({
+          productId: prod.id,
+          name: prod.name,
+          sku: prod.sku,
+          price,
+          quantity: item.quantity,
+          image: prod.primaryImage,
+        });
+      }
+      merchandiseSubtotal = Number(merchandiseSubtotal.toFixed(2));
+
+      // Calculate discount & shipping
+      let discount = 0;
+      let hasFreeShippingCoupon = false;
+      if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+        const code = couponCode.trim().toUpperCase();
+        if (code === 'WELCOME10') {
+          discount = Number(((merchandiseSubtotal * 10) / 100).toFixed(2));
+        } else if (code === 'FREESHIP') {
+          hasFreeShippingCoupon = true;
+        }
+      }
+
+      const isQuoteRequest = paymentMethod === 'MANUAL_QUOTE';
+      const shippingCalc = ShippingCalculationService.calculate({
+        destinationCountryIso: isDomestic ? 'PK' : (destCountryIso || 'PK'),
+        items: orderItems as any,
+        catalogProducts: catalogList,
+        settings: INITIAL_SETTINGS as any,
+        hasFreeShippingCoupon,
+        merchandiseSubtotalPkr: merchandiseSubtotal,
+        discountPkr: discount,
+      });
+
+      const shippingFee = isQuoteRequest ? 0 : Number(shippingCalc.finalShippingFee.toFixed(2));
+      const taxable = Math.max(0, merchandiseSubtotal - discount);
+      const taxRate = isDomestic ? (Number(INITIAL_SETTINGS.taxRate) || 0) : 0;
+      const tax = Number(((taxable * taxRate) / 100).toFixed(2));
+      const total = Number((taxable + tax + shippingFee).toFixed(2));
+
+      // Decrement stock in catalog
+      const now = new Date().toISOString();
+      for (const item of items) {
+        const idx = catalogList.findIndex((p) => p.id === item.productId || p.sku === item.productId);
+        if (idx > -1) {
+          catalogList[idx].stock = Math.max(0, catalogList[idx].stock - item.quantity);
+          catalogList[idx].updatedAt = now;
+        }
+      }
+      fs.writeFileSync(CATALOG_FILE, JSON.stringify(catalogList, null, 2), 'utf-8');
+
+      // Generate Order
+      const orderNumber = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
+      const orderId = `ord-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+      const orderAccessToken = crypto.randomBytes(24).toString('hex');
+
+      let initialStatus: OrderStatus = 'PENDING';
+      let initialPaymentStatus: PaymentStatus = 'PENDING';
+      if (paymentMethod === 'COD') {
+        initialStatus = 'PENDING';
+        initialPaymentStatus = 'PENDING';
+      } else if (paymentMethod === 'MANUAL_QUOTE') {
+        initialStatus = 'QUOTE_REQUESTED';
+        initialPaymentStatus = 'PENDING';
+      } else {
+        initialStatus = 'PENDING';
+        initialPaymentStatus = 'PENDING_VERIFICATION';
+      }
+
+      const fullAddressSummary = typeof shippingAddress === 'string'
+        ? shippingAddress
+        : `${addressLine}, ${city}${district && district !== city ? `, ${district}` : ''}${tehsil ? `, Tehsil: ${tehsil}` : ''}, Pakistan (Phone: ${cleanPhone})`;
+
+      const orderData: Order = {
+        id: orderId,
+        orderNumber,
+        userId: userId || null,
+        orderAccessToken,
+        items: orderItems,
+        customerName: (customerName || req.body.name || '').toString().trim(),
+        customerEmail: (customerEmail || req.body.email || '').toString().trim().toLowerCase(),
+        customerPhone: cleanPhone,
+        destCountryIso: isDomestic ? 'PK' : (destCountryIso || 'PK'),
+        status: initialStatus,
+        paymentStatus: initialPaymentStatus,
+        paymentMethod: paymentMethod as any,
+        ...((tid || req.body.paymentReference) ? { paymentReference: String(tid || req.body.paymentReference).trim() } : {}),
+        subtotal: merchandiseSubtotal,
+        discount,
+        tax,
+        shippingFee,
+        total,
+        currency: INITIAL_SETTINGS.currency || 'PKR',
+        exchangeRateSnapshot: INITIAL_SETTINGS.usdToPkrRate || 278.5,
+        ...(couponCode ? { couponCode: String(couponCode).toUpperCase() } : {}),
+        shippingAddressSummary: fullAddressSummary,
+        shippingCalculationSnapshot: ShippingCalculationService.createSnapshot(shippingCalc),
+        district: district || city,
+        tehsil: tehsil || '',
+        notes: (notes || `[Items: ${orderItems.map((i) => `${i.sku}x${i.quantity}`).join(', ')}] | [Method: ${paymentMethod}${tid ? ` · TID: ${tid}` : ''}]`).slice(0, 950),
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const localOrders = getLocalOrders();
+      localOrders.unshift(orderData);
+      saveLocalOrders(localOrders);
+
+      result = {
+        orderId,
+        orderNumber,
+        orderAccessToken,
+        order: orderData,
+      };
+    }
+
+    res.status(201).json({
+      success: true,
+      orderNumber: result.orderNumber,
+      orderAccessToken: result.orderAccessToken,
+      orderId: result.orderId,
+      order: result.order,
+      trackingUrl: `/track?order=${result.orderNumber}&token=${result.orderAccessToken}`,
+    });
+  } catch (err: any) {
+    console.error('Order creation transaction failed:', err);
+    res.status(400).json({
+      error: err?.message || 'Failed to create order.',
+      code: 'ORDER_CREATION_FAILED',
+    });
+  }
+});
+
+// 6.2. GET /api/orders/track (Secure Order Tracking for Guests & Members)
+app.get('/api/orders/track', async (req, res) => {
+  const { order, token } = req.query;
+  if (!order || typeof order !== 'string') {
+    return res.status(400).json({ error: 'Order reference parameter is required.' });
+  }
+
+  try {
+    let orderData: Order | null = null;
+    try {
+      const q = await adminDb.collection('orders').where('orderNumber', '==', order.trim().toUpperCase()).limit(1).get();
+      if (!q.empty) {
+        orderData = q.docs[0].data() as Order;
+      }
+    } catch {
+      // Fallback to local storage if Firestore is unconfigured in container
+    }
+
+    if (!orderData) {
+      const localOrders = getLocalOrders();
+      orderData = localOrders.find((o) => o.orderNumber.toUpperCase() === order.trim().toUpperCase()) || null;
+    }
+
+    if (!orderData) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+
+    let callerUid: string | null = null;
+    let callerIsAdmin = false;
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(authHeader.slice(7).trim());
+        callerUid = decoded.uid;
+        try {
+          const uDoc = await adminDb.collection('users').doc(decoded.uid).get();
+          const role = uDoc.data()?.role;
+          callerIsAdmin = Boolean(role && ALLOWED_ADMIN_ROLES.includes(String(role).toUpperCase()));
+        } catch {}
+      } catch {}
+    }
+
+    const isOwner = Boolean(callerUid && orderData.userId && callerUid === orderData.userId);
+    const hasValidGuestToken = Boolean(token && orderData.orderAccessToken && token === orderData.orderAccessToken);
+
+    if (!callerIsAdmin && !isOwner && !hasValidGuestToken) {
+      return res.status(403).json({ error: 'Unauthorized: Invalid tracking token or permission.' });
+    }
+
+    res.json({
+      success: true,
+      order: {
+        id: orderData.id,
+        orderNumber: orderData.orderNumber,
+        status: orderData.status,
+        paymentStatus: orderData.paymentStatus,
+        paymentMethod: orderData.paymentMethod,
+        paymentReference: orderData.paymentReference,
+        subtotal: orderData.subtotal,
+        discount: orderData.discount,
+        shippingFee: orderData.shippingFee,
+        total: orderData.total,
+        currency: orderData.currency,
+        items: orderData.items,
+        trackingNumber: orderData.trackingNumber,
+        courierName: orderData.courierName,
+        shippingAddressSummary: orderData.shippingAddressSummary,
+        createdAt: orderData.createdAt,
+        updatedAt: orderData.updatedAt,
+      },
+    });
+  } catch (err: any) {
+    console.error('Order tracking lookup error:', err);
+    res.status(500).json({ error: 'Failed to retrieve order tracking info.' });
+  }
+});
+
+// 6.3. POST /api/orders/cancel (Cancel Order & Authoritatively Restore Stock on Server)
+app.post('/api/orders/cancel', async (req, res) => {
+  const { orderId, orderNumber, orderAccessToken, reason } = req.body;
+  if (!orderId && !orderNumber) {
+    return res.status(400).json({ error: 'orderId or orderNumber is required.' });
+  }
+
+  let callerUid: string | null = null;
+  let callerIsAdmin = false;
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (token) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        callerUid = decoded.uid;
+        try {
+          const userDoc = await adminDb.collection('users').doc(decoded.uid).get();
+          const role = userDoc.data()?.role;
+          callerIsAdmin = Boolean(role && ALLOWED_ADMIN_ROLES.includes(String(role).toUpperCase()));
+        } catch {}
+      } catch {}
+    }
+  }
+
+  try {
+    let orderDocRef = orderId ? adminDb.collection('orders').doc(orderId) : null;
+    let orderSnap: FirebaseFirestore.DocumentSnapshot | null = null;
+
+    try {
+      orderSnap = orderDocRef ? await orderDocRef.get() : null;
+      if ((!orderSnap || !orderSnap.exists) && orderNumber) {
+        const q = await adminDb.collection('orders').where('orderNumber', '==', String(orderNumber).trim().toUpperCase()).limit(1).get();
+        if (!q.empty) {
+          orderSnap = q.docs[0];
+          orderDocRef = q.docs[0].ref;
+        }
+      }
+    } catch {}
+
+    let orderData: Order | null = (orderSnap && orderSnap.exists) ? (orderSnap.data() as Order) : null;
+
+    if (!orderData) {
+      const localOrders = getLocalOrders();
+      orderData = localOrders.find((o) => (orderId && o.id === orderId) || (orderNumber && o.orderNumber.toUpperCase() === String(orderNumber).trim().toUpperCase())) || null;
+    }
+
+    if (!orderData) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+
+    const isOwner = Boolean(callerUid && orderData.userId && callerUid === orderData.userId);
+    const hasValidToken = Boolean(orderAccessToken && orderData.orderAccessToken && orderAccessToken === orderData.orderAccessToken);
+
+    if (!callerIsAdmin && !isOwner && !hasValidToken) {
+      return res.status(403).json({ error: 'Forbidden: You do not have permission to cancel this order.' });
+    }
+
+    if (!callerIsAdmin && !['PENDING', 'QUOTE_REQUESTED'].includes(orderData.status)) {
+      return res.status(400).json({
+        error: `Cannot cancel order with status "${orderData.status}". Only PENDING orders can be cancelled.`,
+      });
+    }
+
+    if (['CANCELLED', 'REFUNDED'].includes(orderData.status)) {
+      return res.status(400).json({ error: 'Order is already cancelled or refunded.' });
+    }
+
+    // Try Firestore transaction if ref exists
+    let firestoreSucceeded = false;
+    if (orderDocRef) {
+      try {
+        await adminDb.runTransaction(async (transaction) => {
+          const freshOrderDoc = await transaction.get(orderDocRef!);
+          const freshOrder = freshOrderDoc.data() as Order;
+
+          if (['CANCELLED', 'REFUNDED'].includes(freshOrder.status)) {
+            throw new Error('Order is already cancelled.');
+          }
+
+          // Restore stock for items
+          if (Array.isArray(freshOrder.items) && freshOrder.items.length > 0) {
+            for (const item of freshOrder.items) {
+              if (item.productId && item.quantity > 0) {
+                const prodRef = adminDb.collection('products').doc(item.productId);
+                const prodDoc = await transaction.get(prodRef);
+                if (prodDoc.exists) {
+                  const currentStock = prodDoc.data()?.stock ?? 0;
+                  transaction.update(prodRef, {
+                    stock: currentStock + item.quantity,
+                    updatedAt: new Date().toISOString(),
+                  });
+                }
+              }
+            }
+          }
+
+          transaction.update(orderDocRef!, {
+            status: 'CANCELLED',
+            cancellationReason: reason || 'Cancelled by customer/operator',
+            cancelledAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+        });
+        firestoreSucceeded = true;
+      } catch (e: any) {
+        console.warn('Firestore cancel transaction failed, falling back to local restoration:', e?.message);
+      }
+    }
+
+    // Restore stock in local catalog and update local orders
+    if (fs.existsSync(CATALOG_FILE) && Array.isArray(orderData.items)) {
+      try {
+        const catalogList: any[] = JSON.parse(fs.readFileSync(CATALOG_FILE, 'utf-8'));
+        const now = new Date().toISOString();
+        for (const it of orderData.items) {
+          const pIdx = catalogList.findIndex((p) => p.id === it.productId || p.sku === it.productId);
+          if (pIdx > -1) {
+            catalogList[pIdx].stock = (catalogList[pIdx].stock || 0) + it.quantity;
+            catalogList[pIdx].updatedAt = now;
+          }
+        }
+        fs.writeFileSync(CATALOG_FILE, JSON.stringify(catalogList, null, 2), 'utf-8');
+      } catch (catErr) {
+        console.error('Failed to restore local catalog stock:', catErr);
+      }
+    }
+
+    const localOrders = getLocalOrders();
+    const lIdx = localOrders.findIndex((o) => o.orderNumber === orderData!.orderNumber);
+    if (lIdx > -1) {
+      localOrders[lIdx].status = 'CANCELLED';
+      localOrders[lIdx].updatedAt = new Date().toISOString();
+      saveLocalOrders(localOrders);
+    }
+
+    res.json({
+      success: true,
+      orderNumber: orderData.orderNumber,
+      message: 'Order cancelled successfully and product inventory has been restored.',
+    });
+  } catch (err: any) {
+    console.error('Order cancellation error:', err);
+    res.status(500).json({ error: err.message || 'Failed to cancel order.' });
   }
 });
 
@@ -2206,8 +2952,8 @@ customerSupportTickets.set('tkt-init-03', {
 // Dedicated 24/7 Client Helpline & AI Concierge using gemini-3.8-flash (Public with 10 req/min rate limit and 1000 char cap)
 app.post('/api/ai/customer-support', async (req, res) => {
   try {
-    const clientIp = req.ip || 'local';
-    if (!checkRateLimit(clientIp, 10, 60_000)) {
+    const clientIp = (req.ip || req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'local').toString();
+    if (!checkRateLimit(`support:${clientIp}`, 10, 60_000)) {
       return res.status(429).json({ error: 'Rate limit reached (10 requests per minute). Please wait a moment.' });
     }
 
