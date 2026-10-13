@@ -1,0 +1,6 @@
+{
+  "name": "Atelier Aurelia — AI-Operated Luxury Commerce Platform",
+  "description": "Production-grade luxury e-commerce storefront and AI-operated executive admin command center with natural-language store automation, inventory control, CSV workflows, and real-time analytics.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

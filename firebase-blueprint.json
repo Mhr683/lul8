@@ -1,0 +1,276 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and role information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 255 },
+        "name": { "type": "string", "maxLength": 120 },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "ADMIN", "MANAGER", "PRODUCT_MANAGER", "ORDER_MANAGER", "CUSTOMER"]
+        },
+        "phone": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "name", "role", "createdAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Storefront catalog product with inventory, pricing, SEO, and variants",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "sku": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 200 },
+        "slug": { "type": "string", "maxLength": 220, "pattern": "^[a-z0-9\\-]+$" },
+        "shortDescription": { "type": "string", "maxLength": 500 },
+        "description": { "type": "string", "maxLength": 5000 },
+        "price": { "type": "number" },
+        "compareAtPrice": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "stock": { "type": "integer" },
+        "reservedStock": { "type": "integer" },
+        "lowStockThreshold": { "type": "integer" },
+        "category": { "type": "string", "maxLength": 80 },
+        "subcategory": { "type": "string", "maxLength": 80 },
+        "brand": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "enum": ["ACTIVE", "DRAFT", "ARCHIVED"] },
+        "featured": { "type": "boolean" },
+        "bestSeller": { "type": "boolean" },
+        "newArrival": { "type": "boolean" },
+        "seoTitle": { "type": "string", "maxLength": 160 },
+        "seoDescription": { "type": "string", "maxLength": 320 },
+        "seoKeywords": { "type": "string", "maxLength": 400 },
+        "primaryImage": { "type": "string", "maxLength": 1000 },
+        "rating": { "type": "number" },
+        "reviewCount": { "type": "integer" },
+        "weightKg": { "type": "number" },
+        "dimensions": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sku", "name", "slug", "price", "stock", "category", "brand", "status", "createdAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Product category and taxonomy",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "slug": { "type": "string", "maxLength": 120, "pattern": "^[a-z0-9\\-]+$" },
+        "description": { "type": "string", "maxLength": 600 },
+        "seoTitle": { "type": "string", "maxLength": 160 },
+        "seoDescription": { "type": "string", "maxLength": 320 },
+        "productCount": { "type": "integer" }
+      },
+      "required": ["id", "name", "slug"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer purchase order with payment and fulfillment status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "orderNumber": { "type": "string", "maxLength": 64 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 150 },
+        "customerEmail": { "type": "string", "format": "email", "maxLength": 255 },
+        "customerPhone": { "type": "string", "maxLength": 50 },
+        "destCountryIso": { "type": "string", "maxLength": 10 },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "CONFIRMED", "PROCESSING", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED", "REFUNDED", "RETURNED", "QUOTE_REQUESTED", "QUOTE_READY", "QUOTE_ACCEPTED", "QUOTE_REJECTED", "QUOTE_EXPIRED"]
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["PENDING", "PENDING_VERIFICATION", "PAID", "FAILED", "REFUND_PENDING", "REFUNDED", "PARTIALLY_REFUNDED"]
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["COD", "NAYAPAY", "RAAST_IBAN", "BANK_TRANSFER", "MANUAL", "MANUAL_QUOTE"]
+        },
+        "paymentSubMethod": { "type": "string", "maxLength": 60 },
+        "paymentReference": { "type": "string", "maxLength": 120 },
+        "paymentProofDetails": { "type": "string", "maxLength": 400 },
+        "paymentVerifiedBy": { "type": "string", "maxLength": 150 },
+        "paymentVerifiedAt": { "type": "string", "format": "date-time" },
+        "paymentVerificationNote": { "type": "string", "maxLength": 500 },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "tax": { "type": "number" },
+        "shippingFee": { "type": "number" },
+        "total": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 10 },
+        "exchangeRateSnapshot": { "type": "number" },
+        "couponCode": { "type": "string", "maxLength": 64 },
+        "shippingAddressSummary": { "type": "string", "maxLength": 500 },
+        "shippingCalculationSnapshot": { "type": "object" },
+        "trackingNumber": { "type": "string", "maxLength": 120 },
+        "courierName": { "type": "string", "maxLength": 100 },
+        "quoteAmount": { "type": "number" },
+        "quoteCourier": { "type": "string", "maxLength": 100 },
+        "quoteEstimatedDays": { "type": "string", "maxLength": 100 },
+        "quoteCustomsMode": { "type": "string", "enum": ["NOT_APPLICABLE", "DAP", "DDP"] },
+        "quoteAdminNotes": { "type": "string", "maxLength": 1000 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orderNumber", "userId", "customerName", "customerEmail", "status", "paymentStatus", "paymentMethod", "total", "createdAt"]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Promotional discount code and conditions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["PERCENTAGE", "FIXED", "FREE_SHIPPING", "BOGO"] },
+        "value": { "type": "number" },
+        "minCartAmount": { "type": "number" },
+        "maxDiscount": { "type": "number" },
+        "categoryFilter": { "type": "string", "maxLength": 100 },
+        "usageLimit": { "type": "integer" },
+        "usedCount": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "code", "type", "value", "active", "createdAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Verified customer product review and rating",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "productId": { "type": "string", "maxLength": 128 },
+        "productName": { "type": "string", "maxLength": 200 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 120 },
+        "rating": { "type": "integer" },
+        "title": { "type": "string", "maxLength": 160 },
+        "comment": { "type": "string", "maxLength": 2000 },
+        "verifiedPurchase": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["APPROVED", "PENDING", "REJECTED"] },
+        "helpfulCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "productId", "userId", "authorName", "rating", "comment", "status", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable administrative and AI operation audit record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "action": { "type": "string", "maxLength": 120 },
+        "resource": { "type": "string", "maxLength": 120 },
+        "details": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "action", "resource", "createdAt"]
+    },
+    "AITask": {
+      "title": "AITask",
+      "description": "Long-running AI task or bulk operation execution record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "toolName": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"] },
+        "totalItems": { "type": "integer" },
+        "completedItems": { "type": "integer" },
+        "failedItems": { "type": "integer" },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUid", "name", "toolName", "status", "totalItems", "completedItems", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System or store alert notification",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["NEW_ORDER", "LOW_STOCK", "PAYMENT_FAILURE", "NEW_REVIEW", "REFUND", "IMPORT_FAILED", "AI_TASK_COMPLETED", "AI_TASK_FAILED"] },
+        "title": { "type": "string", "maxLength": 160 },
+        "message": { "type": "string", "maxLength": 600 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "type", "title", "message", "read", "createdAt"]
+    },
+    "Setting": {
+      "title": "Setting",
+      "description": "Global store configuration settings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "storeName": { "type": "string", "maxLength": 120 },
+        "contactEmail": { "type": "string", "format": "email", "maxLength": 255 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "taxRate": { "type": "number" },
+        "freeShippingThreshold": { "type": "number" },
+        "flatShippingRate": { "type": "number" },
+        "guestCheckoutEnabled": { "type": "boolean" },
+        "aiTone": { "type": "string", "enum": ["Professional", "Premium", "Friendly", "Minimal", "Luxury", "Persuasive"] },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "storeName", "contactEmail", "currency", "taxRate"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User accounts and roles (PII protected to owner or admin)"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public storefront catalog products, managed by Admins"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Public storefront categories, managed by Admins"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders accessible only by order owner or Admin"
+    },
+    "/coupons/{couponId}": {
+      "schema": { "$ref": "#/entities/Coupon" },
+      "description": "Active store promotional coupons"
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Product customer reviews and ratings"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Admin and AI execution audit trail"
+    },
+    "/ai_tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/AITask" },
+      "description": "AI background and batch operations"
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "User and Admin store notifications"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Setting" },
+      "description": "Storefront and operational settings"
+    }
+  }
+}

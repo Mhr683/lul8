@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      // AI Studio Dev Environment: Suppress expected Vite HMR WebSocket closure in Cloud Run proxy
+      (function() {
+        function isWsError(err) {
+          if (!err) return false;
+          var str = String(err.message || err.reason || err.stack || err || '');
+          return str.indexOf('WebSocket closed without opened') !== -1 ||
+                 str.indexOf('WebSocket closed') !== -1 ||
+                 (str.indexOf('WebSocket') !== -1 && str.indexOf('closed') !== -1);
+        }
+
+        window.addEventListener('unhandledrejection', function(e) {
+          if (isWsError(e.reason)) {
+            e.preventDefault();
+            e.stopImmediatePropagation && e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('error', function(e) {
+          if (isWsError(e.message) || isWsError(e.error)) {
+            e.preventDefault();
+            e.stopImmediatePropagation && e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        // Intercept WebSocket creation so async close listeners don't leak unhandled promise rejections
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          var OriginalWS = window.WebSocket;
+          var ProxiedWS = function(url, protocols) {
+            var ws = protocols !== undefined ? new OriginalWS(url, protocols) : new OriginalWS(url);
+            var origAdd = ws.addEventListener.bind(ws);
+            ws.addEventListener = function(type, listener, options) {
+              if (type === 'close' && typeof listener === 'function') {
+                var safeListener = function(event) {
+                  try {
+                    var res = listener.call(this, event);
+                    if (res && typeof res.catch === 'function') {
+                      res.catch(function() {});
+                    }
+                    return res;
+                  } catch (err) {}
+                };
+                return origAdd(type, safeListener, options);
+              }
+              return origAdd(type, listener, options);
+            };
+            return ws;
+          };
+          ProxiedWS.prototype = OriginalWS.prototype;
+          ProxiedWS.CONNECTING = OriginalWS.CONNECTING;
+          ProxiedWS.OPEN = OriginalWS.OPEN;
+          ProxiedWS.CLOSING = OriginalWS.CLOSING;
+          ProxiedWS.CLOSED = OriginalWS.CLOSED;
+          window.WebSocket = ProxiedWS;
+        }
+      })();
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atelier Aurelia — AI-Operated Luxury Commerce Platform</title>
+    <meta
+      name="description"
+      content="Production-grade luxury e-commerce storefront and AI-operated executive admin command center with natural-language store automation, inventory control, CSV workflows, and real-time analytics."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Atelier Aurelia — AI-Operated Luxury Commerce Platform" />
+    <meta
+      property="og:description"
+      content="Production-grade luxury e-commerce storefront and AI-operated executive admin command center with natural-language store automation, inventory control, CSV workflows, and real-time analytics."
+    />
+    <meta property="og:site_name" content="Atelier Aurelia" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Atelier Aurelia — AI-Operated Luxury Commerce Platform" />
+    <meta name="twitter:description" content="Production-grade luxury e-commerce storefront and AI-operated executive admin command center with natural-language store automation, inventory control, CSV workflows, and real-time analytics." />
+    <!-- PWA & Mobile Installability Standards -->
+    <meta name="theme-color" content="#141413" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Atelier" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Store",
+        "name": "Atelier Aurelia",
+        "description": "Bespoke Luxury Goods, Leathercraft, Swiss Horology, and Architectural Objects.",
+        "priceRange": "$$$",
+        "currenciesAccepted": "USD, EUR, GBP",
+        "paymentAccepted": "Credit Card, Stripe, PayPal, Cash on Delivery"
+      }
+    </script>
+  </head>
+  <body class="bg-[#FBFBF9] text-[#141413] antialiased selection:bg-[#141413] selection:text-[#FBFBF9]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

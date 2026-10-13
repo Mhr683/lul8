@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141413" />
+      <stop offset="50%" stop-color="#1D1D1B" />
+      <stop offset="100%" stop-color="#0B0B0A" />
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EED9A8" />
+      <stop offset="50%" stop-color="#C5A059" />
+      <stop offset="100%" stop-color="#9E7D3B" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.5" />
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="512" height="512" rx="104" fill="url(#bg)" />
+
+  <!-- Outer Geometric Gold Ring -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="url(#gold)" stroke-width="3" stroke-dasharray="12 6" opacity="0.6" />
+  <circle cx="256" cy="256" r="184" fill="none" stroke="url(#gold)" stroke-width="1.5" opacity="0.8" />
+
+  <!-- Inner Diamond & Compass Structure -->
+  <path d="M 256,92 L 396,256 L 256,420 L 116,256 Z" fill="none" stroke="url(#gold)" stroke-width="1.5" opacity="0.4" />
+
+  <!-- Luxury Monogram "AA" (Atelier Aurelia) -->
+  <g filter="url(#shadow)">
+    <!-- First 'A' Left -->
+    <path d="M 216 168 L 160 336 L 188 336 L 202 292 L 250 292 L 244 274 L 208 274 L 226 218 Z" fill="url(#gold)" />
+    <!-- Second 'A' Right (Interlocking) -->
+    <path d="M 296 168 L 268 252 L 286 252 L 296 220 L 324 306 L 352 306 L 306 168 Z" fill="url(#gold)" />
+    <!-- Crossbar and Accent Bar -->
+    <rect x="200" y="274" width="112" height="12" rx="2" fill="url(#gold)" opacity="0.9" />
+  </g>
+
+  <!-- Four Architectural Cardinal Markers -->
+  <circle cx="256" cy="72" r="4" fill="url(#gold)" />
+  <circle cx="256" cy="440" r="4" fill="url(#gold)" />
+  <circle cx="72" cy="256" r="4" fill="url(#gold)" />
+  <circle cx="440" cy="256" r="4" fill="url(#gold)" />
+
+  <!-- Subtitle -->
+  <text x="256" y="380" font-family="'Cormorant Garamond', 'Times New Roman', serif" font-size="28" font-weight="600" letter-spacing="8" fill="url(#gold)" text-anchor="middle">ATELIER</text>
+</svg>
